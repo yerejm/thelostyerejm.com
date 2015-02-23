@@ -1,1 +1,326 @@
-hello world
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN""http://www.w3.org/TR/html4/strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+    <html>
+        <head>
+            <title>You shouldn't be here...</title>
+            <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
+            <script type="text/javascript">
+// http://www.vergenet.net/~conrad/boids/pseudocode.html
+(function () {
+    // global variables
+    var animator = null; // the animation callback
+    var cvs = null; // canvas
+    var mouse_pos = [0,0]; // mouse co-ordinates
+    var scatter = 0; // scatter time: countdown until boids remember their rules
+
+    ///
+    /// Vector stuff
+    ///
+    function vector_create(size) {
+        if (size === undefined) throw "vector_create: undefined size";
+        var vec = [];
+        for (var i = 0; i < size; i += 1) {
+            vec.push(0.0);
+        }
+        return vec;
+    }
+    function vector_add(v, offset) {
+        var result = [];
+        for (var i = 0; i < v.length; i += 1) {
+            result.push(v[i] + offset[i]);
+        }
+        return result;
+    }
+    function vector_scale(v, n) {
+        var result = [];
+        for (var i = 0; i < v.length; i += 1) {
+            result.push(v[i] * n);
+        }
+        return result;
+    }
+    function vector_subtract(v, offset) {
+        var result = [];
+        for (var i = 0; i < v.length; i += 1) {
+            result.push(v[i] - offset[i]);
+        }
+        return result;
+    }
+    function vector_magnitude(v) {
+        var result = 0;
+        for (var i = 0; i < v.length; i += 1) {
+            result += Math.pow(v[i], 2);
+        }
+        return Math.sqrt(result);
+    }
+    function vector_dot(a, b) {
+        var dot = 0.0;
+        for (var i = 0; i < a.length; i += 1) {
+            dot += a[i] * b[i];
+        }
+        return dot;
+    }
+    function vector_angle(v1, v2) {
+        return Math.acos(vector_dot(v1, v2) / (vector_magnitude(v1) * vector_magnitude(v2)));
+    }
+    function vector_normalise(v) {
+        var mag = vector_magnitude(v);
+        if (mag == 0) return v;
+        return vector_scale(v, 1.0 / mag);
+    }
+    ///
+    /// Boid stuff
+    ///
+    function boid_create() {
+        function make_random() {
+            var v = [Math.random() * 5.0 + 1.0, Math.random() * 5.0 + 1.0];
+            v[0] *= (Math.random() >= 0.5 ? -1 : 1);
+            v[1] *= (Math.random() >= 0.5 ? -1 : 1);
+            return v;
+        }
+        function rand(x) {
+            return Math.floor(Math.random() * x);
+        }
+        var that = {};
+        that.position = [rand(cvs.getAttribute('width')), rand(cvs.getAttribute('height'))];
+        that.velocity = make_random();
+        that.bounding_radius = 15;
+        that.angle_of_sight = 270 * Math.PI / 180.0; // rads
+        return that;
+    }
+    function boid_distance(boid_self, boid_other) {
+        return Math.sqrt(Math.pow(boid_self.position[0] - boid_other.position[0], 2) +
+                Math.pow(boid_self.position[1] - boid_other.position[1], 2));
+    }
+    function boid_visible(boid_self, boid_other) {
+        var r = boid_distance(boid_other, boid_self);
+        function boid_vector_angle(v1, v2) {
+            var diff = vector_subtract(v2.position, v1.position);
+            return Math.acos(vector_dot(v1.velocity, diff) / (vector_magnitude(v1.velocity) * vector_magnitude(diff)));
+        }
+
+        var t = boid_vector_angle(boid_self, boid_other);
+        return r < boid_self.bounding_radius * 6 &&
+            ((t >= 0 && t <= boid_self.angle_of_sight / 2) ||
+             (t >= 2 * Math.PI - boid_self.angle_of_sight && t <= 2 * Math.PI));
+    }
+    function boid_alignment(b, flock) {
+        var v = vector_create(2);
+        for (var i = 0; i < flock.length; i += 1) {
+            v = vector_add(v, flock[i].velocity);
+        }
+        v = vector_scale(v, 1.0 / flock.length);
+        return vector_scale(vector_subtract(v, b.velocity), 1 / 4.0); // magic numbers...
+    }
+    function boid_cohesion(b, flock) {
+        var v = vector_create(2);
+        for (var i = 0; i < flock.length; i += 1) {
+            v = vector_add(v, flock[i].position);
+        }
+        v = vector_scale(v, 1.0 / flock.length);
+        return vector_scale(vector_subtract(v, b.position), 1 / 100.0); // dum de dum...
+    }
+    function boid_separation(b, flock) {
+        var c = vector_create(2);
+        for (var i = 0; i < flock.length; i += 1) {
+            var diff = vector_subtract(flock[i].position, b.position);
+            if (vector_magnitude(diff) < b.bounding_radius * 3) {
+                c = vector_subtract(c, diff);
+            }
+        }
+        return vector_scale(c, 1 / 8.0);  // magic numbers to make things fun...
+    }
+
+    // but seriously, magic numbers are to weaken the affect of the 
+    // vectors that will affect the boid.
+    function boid_avoidance(b) {
+        var buffer = b.bounding_radius * 3;
+        var v = vector_create(2);
+
+        var avoid = function(Xmin, Xmax, Ymin, Ymax, power, bfr) {
+            var vec = vector_create(2);
+            if (b.position[0] < Xmin + bfr)
+                vec[0] = power;
+            if (b.position[0] > Xmax - bfr)
+                vec[0] = -power;
+            if (b.position[1] < Ymin + bfr)
+                vec[1] = power;
+            else if (b.position[1] > Ymax - bfr)
+                vec[1] = -power;
+            return vec;
+        }
+        return avoid(0, cvs.getAttribute('width'), 0, cvs.getAttribute('height'), 10, buffer);
+    }
+    function boid_avoid_mouse(b) {
+        var c = vector_create(2);
+        var mdiff = vector_subtract(mouse_pos, b.position);
+        if (vector_magnitude(mdiff) < b.bounding_radius * 3) {
+            c = vector_scale(vector_subtract(c, mdiff), 3);
+        }
+
+        return vector_scale(c, 1 / 8.0);
+    }
+    function boid_velocity_add(v, offset) {
+        var nv = vector_add(v, offset);
+        var mag = vector_magnitude(nv);
+        var angle = vector_angle(v, offset);
+        var max_turn = 10 * Math.PI / 180;
+        if (Math.abs(angle) > max_turn) {
+            offset = vector_scale(offset, angle / ((360 * Math.PI / 180) / max_turn))
+        }
+        nv = vector_add(v, offset);
+        mag = vector_magnitude(nv);
+        if (mag > 8) {
+            nv = vector_scale(vector_normalise(nv), 8);
+        }
+        else if (mag < 5) {
+            nv = vector_scale(vector_normalise(nv), 5);
+        }
+
+        return nv;
+    }
+    function boid_render(ctx, boid) {
+        var w = cvs.getAttribute('width');
+        var h = cvs.getAttribute('height');
+        ctx.save();
+        ctx.rotate(90 * Math.PI / 180);
+        ctx.beginPath();
+        ctx.moveTo(0, 0); // head
+        ctx.lineTo(boid.bounding_radius/5, boid.bounding_radius*1.5); // right wing tip
+        ctx.lineTo(0, boid.bounding_radius); // tail
+        ctx.lineTo(-boid.bounding_radius/5, boid.bounding_radius*1.5); // left wing tip
+        ctx.fillStyle = "rgba(255,255,255,0.70)";
+        ctx.fill();
+        ctx.restore();
+    }
+    ///
+    /// Flock stuff
+    ///
+    function flock_create(x) {
+        var that = [];
+        for (var i = 0; i < x; i += 1) {
+            that.push(boid_create());
+        }
+        return that;
+    }
+    function flock_update(flock) {
+        // boids of a feather flock together
+        for (var i = 0; i < flock.length; i += 1) {
+            var b = flock[i];
+            var local_flock = [];
+            for (var j = 0; j < flock.length; j += 1) {
+                if (b != flock[j] && boid_visible(b, flock[j])) {
+                    local_flock.push(flock[j]);
+                }
+            }
+
+            var v = vector_create(2);
+            var v1, v2, v3, v4;
+            if (local_flock.length > 0) {
+                v1 = boid_cohesion(b, local_flock);
+                v2 = boid_separation(b, local_flock);
+                v3 = boid_alignment(b, local_flock);
+
+                if (scatter > 0) {
+                    v1 = vector_scale(v1, -4);
+                    v2 = vector_scale(v1, 4);
+                    scatter -= 1;
+                }
+                v = vector_add(v, v1);
+                v = vector_add(v, v2);
+                v = vector_add(v, v3);
+            }
+
+            v = vector_add(v, boid_avoidance(b));
+            v = vector_add(v, boid_avoid_mouse(b));
+            b.velocity = boid_velocity_add(b.velocity, v);
+
+            b.position[0] += b.velocity[0];
+            b.position[1] += b.velocity[1];
+        }
+
+    }
+    function flock_render(flock, cvs) {
+        var ctx = cvs.getContext('2d');
+        var w = cvs.getAttribute('width');
+        var h = cvs.getAttribute('height');
+        ctx.save();
+        ctx.clearRect(0, 0, w, h);
+
+        for (var i = 0; i < flock.length; i += 1) {
+            var boid = flock[i];
+            ctx.save();
+            try {
+                ctx.translate.apply(ctx, boid.position);
+                ctx.rotate(Math.atan2(boid.velocity[1] , boid.velocity[0]));
+            } catch (e) {
+                console.log(boid);
+                throw e;
+            }
+            boid_render(ctx, boid);
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+
+    ///
+    /// event callbacks
+    ///
+    function mouse(evt) {
+        mouse_pos[0] = evt.layerX - 3;
+        mouse_pos[1] = evt.layerY - 3;
+    }
+    function resize() {
+        cvs.setAttribute('width', Math.floor(window.innerWidth - 50));
+        cvs.setAttribute('height', Math.floor(window.innerHeight - 50));
+    }
+
+    ///
+    /// start when document has loaded
+    ///
+    window.onload = function () {
+        cvs = document.getElementById('c');
+        resize();
+        var width = cvs.getAttribute('width');
+        var height = cvs.getAttribute('height');
+        var ctx = cvs.getContext('2d');
+
+        var flock = flock_create(250);
+
+        var renderer = function () {
+            try {
+                flock_update(flock);
+                flock_render(flock, cvs);
+            } catch (e) {
+                cvs.removeEventListener('mousemove', mouse, false);
+                if (animator) clearInterval(animator);
+                console.log(e);
+            }
+        };
+
+        window.onresize = resize;
+
+        cvs.addEventListener('mousemove', mouse, false);
+
+        cvs.onclick = function (evt) {
+            b = boid_create();
+            mouse(evt);
+            b.position[0] = mouse_pos[0];
+            b.position[1] = mouse_pos[1];
+            flock.push(b);
+            scatter = 1500;
+        };
+        setInterval(renderer, 15);
+    };
+    window.onunload = function () {
+        if (animator) clearInterval(animator);
+        cvs.removeEventListener('mousemove', mouse, false);
+    };
+})();
+        </script>
+    </head>
+    <body bgcolor="black" style="text-align: center;">
+        <canvas id="c" width="10" height="10"></canvas>
+        <p style="position:fixed;top:0;left:0">It is pitch black. You are likely to be eaten by a grue.</p>
+    </body>
+</html>
+
